@@ -1,21 +1,22 @@
 #!/usr/bin/ruby
 #-------------------------------------------------------------------------------
 # NotePlan Tools script
-# by Jonathan Clark, v1.7.0, 19.11.2020
+# by Jonathan Clark, v1.7.1, 26.11.2020
 #-------------------------------------------------------------------------------
 # See README.md file for details, how to run and configure it.
 # Repository: https://github.com/jgclark/NotePlan-tools/
 #-------------------------------------------------------------------------------
-VERSION = '1.7.0'.freeze
+VERSION = '1.7.1'.freeze
 
 require 'date'
 require 'time'
 require 'cgi'
-# require 'etc' # for login lookup
 require 'colorize'
 require 'optparse' # more details at https://docs.ruby-lang.org/en/2.1.0/OptionParser.html
 
+#-------------------------------------------------------------------------------
 # Setting variables to tweak
+#-------------------------------------------------------------------------------
 HOURS_TO_PROCESS = 24 # by default will process all files changed within this number of hours
 NUM_HEADER_LINES = 3 # suits my use, but probably wants to be 1 for most people
 TAGS_TO_REMOVE = ['#waiting', '#high'].freeze # simple array of strings
@@ -24,25 +25,21 @@ DATE_OFFSET_FORMAT = '%e-%b-%Y'.freeze # TODO: format used to find date to use i
 DATE_TODAY_FORMAT = '%Y%m%d'.freeze # using this to identify the "today" daily note
 
 #-------------------------------------------------------------------------------
-# Other Constants
+# Other Constants & Settings
+#-------------------------------------------------------------------------------
 USERNAME = ENV['LOGNAME'] # pull username from environment
 USER_DIR = ENV['HOME'] # pull home directory from environment
 DROPBOX_DIR = "#{USER_DIR}/Dropbox/Apps/NotePlan/Documents".freeze
 ICLOUDDRIVE_DIR = "#{USER_DIR}/Library/Mobile Documents/iCloud~co~noteplan~NotePlan/Documents".freeze
 CLOUDKIT_DIR = "#{USER_DIR}/Library/Containers/co.noteplan.NotePlan3/Data/Library/Application Support/co.noteplan.NotePlan3".freeze
-TodaysDate = Date.today # can't work out why this needs to be a 'constant' to work -- something about visibility, I suppose
-# User = Etc.getlogin # for debugging when running by launchctl
-NP_BASE_DIR = DROPBOX_DIR if Dir.exist?(DROPBOX_DIR) && Dir[File.join(DROPBOX_DIR, '**', '*')].count { |file| File.file?(file) } > 1
-NP_BASE_DIR = ICLOUDDRIVE_DIR if Dir.exist?(ICLOUDDRIVE_DIR) && Dir[File.join(ICLOUDDRIVE_DIR, '**', '*')].count { |file| File.file?(file) } > 1
-NP_BASE_DIR = CLOUDKIT_DIR if Dir.exist?(CLOUDKIT_DIR) && Dir[File.join(CLOUDKIT_DIR, '**', '*')].count { |file| File.file?(file) } > 1
-NP_NOTES_DIR = "#{NP_BASE_DIR}/Notes".freeze
-NP_CALENDAR_DIR = "#{NP_BASE_DIR}/Calendar".freeze
+# TodaysDate = Date.today # can't work out why this needs to be a 'constant' to work -- something about visibility, I suppose
+np_base_dir = DROPBOX_DIR if Dir.exist?(DROPBOX_DIR) && Dir[File.join(DROPBOX_DIR, '**', '*')].count { |file| File.file?(file) } > 1
+np_base_dir = ICLOUDDRIVE_DIR if Dir.exist?(ICLOUDDRIVE_DIR) && Dir[File.join(ICLOUDDRIVE_DIR, '**', '*')].count { |file| File.file?(file) } > 1
+np_base_dir = CLOUDKIT_DIR if Dir.exist?(CLOUDKIT_DIR) && Dir[File.join(CLOUDKIT_DIR, '**', '*')].count { |file| File.file?(file) } > 1
+NP_NOTES_DIR = "#{np_base_dir}/Notes".freeze
+NP_CALENDAR_DIR = "#{np_base_dir}/Calendar".freeze
 
-# Other variables
-time_now = Time.now
-time_now_fmttd = time_now.strftime(DATE_TIME_LOG_FORMAT)
-
-# Colours, using the colorization gem
+# Colours to use with the colorization gem
 # to show some possible combinations, run  String.color_samples
 # to show list of possible modes, run   puts String.modes  (e.g. underline, bold, blink)
 String.disable_colorization false
@@ -51,6 +48,8 @@ InfoColour = :yellow
 WarningColour = :light_red
 
 # Variables that need to be globally available
+time_now = Time.now
+time_now_fmttd = time_now.strftime(DATE_TIME_LOG_FORMAT)
 $verbose = 0
 $archive = 0
 $remove_scheduled = 1
@@ -688,6 +687,7 @@ class NPFile
     n = @line_count - 1
     # Go through each line in the file
     later_header_level = this_header_level = 0
+    at_eof = 1
     while n.positive?
       line = @lines[n]
       # find header lines
@@ -698,8 +698,8 @@ class NPFile
         # puts "    - #{later_header_level} / #{this_header_level}"
         # if later header is same or higher level (fewer #s) as this,
         # then we can delete this line
-        if later_header_level >= this_header_level
-          # puts "    - Removing empty header line #{n} '#{line.chomp}'" if $verbose > 1
+        if later_header_level >= this_header_level || at_eof == 1
+          puts "    - Removing empty header line #{n} '#{line.chomp}'" if $verbose > 1
           @lines.delete_at(n)
           cleaned += 1
           @line_count -= 1
@@ -709,6 +709,7 @@ class NPFile
       elsif line !~ /^\s*$/
         # this has content but is not a header line
         later_header_level = 0
+        at_eof = 0
       else
         # this is a blank line so just ignore it
       end
@@ -773,10 +774,11 @@ opt_parser = OptionParser.new do |opts|
   options[:move] = 1
   options[:archive] = 0 # default off at the moment as feature isn't complete
   options[:remove_scheduled] = 1
+  options[:skipfile] = nil
   options[:skiptoday] = false
   options[:quiet] = false
   options[:verbose] = 0
-  opts.on('-a', '--noarchive', "Don't archive completed tasks into the ## Done section") do
+  opts.on('-a', '--noarchive', "Don't archive completed tasks into the ## Done section") do 
     options[:archive] = 0
   end
   opts.on('-h', '--help', 'Show this help') do
@@ -785,6 +787,9 @@ opt_parser = OptionParser.new do |opts|
   end
   opts.on('-n', '--nomove', "Don't move Daily items with [[Note]] reference to that Note") do
     options[:move] = 0
+  end
+  opts.on('-f', '--skipfile=FILE', "Don't process specific file") do |skipfile| 
+    options[:skipfile] = skipfile
   end
   opts.on('-i', '--skiptoday', "Don't touch today's daily note file") do
     options[:skiptoday] = true
@@ -907,6 +912,10 @@ if $notes.count.positive? # if we have some files to work on ...
   $notes.each do |note|
     if note.is_today && options[:skiptoday]
       puts 'Skipping ' + note.title.to_s.bold + ' due to --skiptoday option'
+      next
+    end
+    if note.title == options[:skipfile]
+      puts 'Skipping ' + note.title.to_s.bold + ' due to --skipfile option'
       next
     end
     puts "Cleaning file id #{note.id} " + note.title.to_s.bold if $verbose > 0
