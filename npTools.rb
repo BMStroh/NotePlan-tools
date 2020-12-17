@@ -1,12 +1,12 @@
 #!/usr/bin/ruby
 #-------------------------------------------------------------------------------
 # NotePlan Tools script
-# by Jonathan Clark, v1.7.1, 26.11.2020
+# by Jonathan Clark, v1.7.3, 10.12.2020
 #-------------------------------------------------------------------------------
 # See README.md file for details, how to run and configure it.
 # Repository: https://github.com/jgclark/NotePlan-tools/
 #-------------------------------------------------------------------------------
-VERSION = '1.7.1'.freeze
+VERSION = '1.7.3'.freeze
 
 require 'date'
 require 'time'
@@ -61,6 +61,43 @@ $npfile_count = -1 # number of NPFile objects created so far (incremented before
 #-------------------------------------------------------------------------
 # Helper definitions
 #-------------------------------------------------------------------------
+
+def calc_offset_date(old_date, interval)
+  # Calculate next review date, assuming:
+  # - old_date is type
+  # - interval is string of form nn[bdwmq]
+  #   - where 'b' is weekday (i.e. Monday-Friday in English)
+  # puts "    c_o_d: old #{old_date} interval #{interval} ..."
+  days_to_add = 0
+  unit = interval[-1] # i.e. get last characters
+  num = interval.chop.to_i
+  case unit
+  when 'b' # week days
+    # Method from Arjen at https://stackoverflow.com/questions/279296/adding-days-to-a-date-but-excluding-weekends
+    # Avoids looping, and copes with negative intervals too
+    current_day_of_week = old_date.strftime("%u").to_i  # = day of week with Monday = 0, .. Sunday = 6
+    dayOfWeek = num < 0 ? (current_day_of_week - 12).modulo(7) : (current_day_of_week + 6).modulo(7) 
+    num -= 1 if dayOfWeek == 6
+    num += 1 if dayOfWeek == -6
+    days_to_add = num + ((num + dayOfWeek).div(5)) * 2
+  when 'd'
+    days_to_add = num
+  when 'w'
+    days_to_add = num * 7
+  when 'm'
+    days_to_add = num * 30 # on average. Better to use >> operator, but it only works for months
+  when 'q'
+    days_to_add = num * 91 # on average
+  when 'y'
+    days_to_add = num * 365 # on average
+  else
+    puts "    Error in calc_offset_date from #{old_date} by #{interval}".colorize(WarningColour)
+  end
+  puts "    c_o_d: with #{old_date} interval #{interval} found #{days_to_add} days_to_add" if $verbose > 1
+  newDate = old_date + days_to_add
+  # implied return newDate
+end
+
 def create_new_empty_file(title, ext)
   # Populate empty NPFile object, adding just title
 
@@ -73,9 +110,9 @@ def create_new_empty_file(title, ext)
   # - text optional, text will be added to the note
   # - openNote optional, values: yes (opens the note, if not already selected), no
   # - subWindow optional (only Mac), values: yes (opens note in a subwindow) and no
-  # NOTE: So far this can only create notes in the top-level Notes folder 
+  # NOTE: So far this can only create notes in the top-level Notes folder
   # Does cope with emojis in titles.
-  uriEncoded = "noteplan://x-callback-url/addNote?noteTitle="+URI.escape(title)+"&openNote=no"
+  uriEncoded = "noteplan://x-callback-url/addNote?noteTitle=" + URI.escape(title) + "&openNote=no"
   begin
     response = `open "#{uriEncoded}"`
   rescue StandardError
@@ -116,7 +153,7 @@ class NPFile
     $npfile_count += 1
     @id = $npfile_count
     @filename = this_file
-    puts "initialising NPFile id #{@id} from #{this_file}" if $verbose > 0
+    puts "initialising NPFile id #{@id} from #{this_file}" if $verbose > 1
     @modified_time = File.exist?(filename) ? File.mtime(this_file) : 0
     @title = nil
     @lines = []
@@ -226,7 +263,7 @@ class NPFile
     n = cleaned = 0
     while n < @line_count
       # Empty any [>] todo lines
-      if (@lines[n] =~ /\[>\]/)
+      if @lines[n] =~ /\[>\]/
         @lines.delete_at(n)
         @line_count -= 1
         n -= 1
@@ -255,7 +292,7 @@ class NPFile
   def move_daily_ref_to_notes
     # Move tasks with a [[note link]] to that note (inserting after header).
     # Checks whether the note exists and if not, creates one first at top level.
-    
+
     # NOTE: In NP v2.4 and 3.0 there's a slight issue that there can be duplicate
     # note titles over different sub-folders. This will likely be improved in
     # the future, but for now I'll try to select the most recently-changed if
@@ -292,14 +329,14 @@ class NPFile
         puts "  - found matching title (id #{noteToAddTo}) " if $verbose > 1
       end
 
-      if !noteToAddTo
+      unless noteToAddTo
         # no existing note was found with this title, so create it and add this text to it
         puts "  - warning: can't find matching note for [[#{noteName}]] -- so will create it".colorize(InfoColour)
         ext = @filename.scan(/\.(.+?)$/).join('')
         create_new_empty_file(noteName, ext) # #FIXME: how to have multiple initializers?
         # now find the id of this newly-created NPFile
         noteToAddTo = $npfile_count
-        f = $allNotes[noteToAddTo].filename
+        # f = $allNotes[noteToAddTo].filename # found that f wasn't being used, so commented out
         puts "    -> file '#{$allNotes[noteToAddTo].filename}' id #{noteToAddTo}" if $verbose > 0
       end
 
@@ -526,7 +563,7 @@ class NPFile
   def calc_offset_date(old_date, interval)
     # Calculate next review date, assuming:
     # - old_date is type
-    # - interval is string of form nn[dwmq]
+    # - interval is string of form nn[bdwmq]
     # puts "    c_o_d: old #{old_date} interval #{interval} ..."
     days_to_add = 0
     unit = interval[-1] # i.e. get last characters
@@ -582,9 +619,9 @@ class NPFile
 
       # find todo lines with {+3d} or {-4w} etc. plus {0d} special case
       dateOffsetString = ''
-      if (line =~ /\*\s+(\[ \])?/) && (line =~ /\{[\+\-]?\d+[dwm]\}/)
+      if (line =~ /\*\s+(\[ \])?/) && (line =~ /\{[\+\-]?\d+[bdwm]\}/)
         puts "    UTD: Found line '#{line.chomp}'" if $verbose > 1
-        line.scan(/\{([\+\-]?\d+[dwm])\}/) { |m| dateOffsetString = m.join }
+        line.scan(/\{([\+\-]?\d+[bdwm])\}/) { |m| dateOffsetString = m.join }
         if dateOffsetString != '' && !lastWasTemplate
           puts "    UTD: Found DOS #{dateOffsetString} in '#{line.chomp}' and lastWasTemplate=#{lastWasTemplate}" if $verbose > 1
           if currentTargetDate != ''
@@ -617,7 +654,7 @@ class NPFile
     # When interval is of the form 2w it will duplicate the task for 2 weeks
     # after the date the task was last due. If this can't be determined,
     # then default to the first option.
-    # Valid intervals are [0-9][dwmqy].
+    # Valid intervals are [0-9][bdwmqy].
     # To work it relies on finding @done(YYYY-MM-DD HH:MM) tags that haven't yet been
     # shortened to @done(YYYY-MM-DD).
     # It includes cancelled tasks as well; to remove a repeat entirely, remoce
@@ -688,7 +725,7 @@ class NPFile
     # Go through each line in the file
     later_header_level = this_header_level = 0
     at_eof = 1
-    while n.positive?
+    while n.positive? || n.zero?
       line = @lines[n]
       # find header lines
       # puts "  - #{n}: '#{line.chomp}'"
@@ -710,8 +747,6 @@ class NPFile
         # this has content but is not a header line
         later_header_level = 0
         at_eof = 0
-      else
-        # this is a blank line so just ignore it
       end
       n -= 1
     end
@@ -774,11 +809,11 @@ opt_parser = OptionParser.new do |opts|
   options[:move] = 1
   options[:archive] = 0 # default off at the moment as feature isn't complete
   options[:remove_scheduled] = 1
-  options[:skipfile] = nil
+  options[:skipfile] = ''
   options[:skiptoday] = false
   options[:quiet] = false
   options[:verbose] = 0
-  opts.on('-a', '--noarchive', "Don't archive completed tasks into the ## Done section") do 
+  opts.on('-a', '--noarchive', "Don't archive completed tasks into the ## Done section") do
     options[:archive] = 0
   end
   opts.on('-h', '--help', 'Show this help') do
@@ -788,7 +823,7 @@ opt_parser = OptionParser.new do |opts|
   opts.on('-n', '--nomove', "Don't move Daily items with [[Note]] reference to that Note") do
     options[:move] = 0
   end
-  opts.on('-f', '--skipfile=FILE', "Don't process specific file") do |skipfile| 
+  opts.on('-f', '--skipfile=TITLE[,TITLE2,TITLE3,etc]', Array, "Don't process specific file(s)") do |skipfile|
     options[:skipfile] = skipfile
   end
   opts.on('-i', '--skiptoday', "Don't touch today's daily note file") do
@@ -813,7 +848,7 @@ $verbose = $quiet ? 0 : options[:verbose] # if quiet, then verbose has to  be 0
 $archive = options[:archive]
 $remove_scheduled = options[:remove_scheduled]
 
-n = 0 # number of notes and daily entries to work on
+# n = 0 # number of notes and daily entries to work on
 
 #--------------------------------------------------------------------------------------
 # Start by reading all Notes files in
@@ -914,7 +949,7 @@ if $notes.count.positive? # if we have some files to work on ...
       puts 'Skipping ' + note.title.to_s.bold + ' due to --skiptoday option'
       next
     end
-    if note.title == options[:skipfile]
+    if options[:skipfile].include? note.title
       puts 'Skipping ' + note.title.to_s.bold + ' due to --skipfile option'
       next
     end

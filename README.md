@@ -1,7 +1,7 @@
 # NotePlan Tools
 `npTools.rb` is a Ruby script that adds functionality to the [NotePlan app](https://noteplan.co/). Particularly when run frequently, this provides a more flexible system for repeating tasks, allows for due dates to be expressed as offsets which allows for templates, and moves or files items from Daily files to Note files. It incorporates an earlier script to 'clean' or tidy up NotePlan's data files.
 
-Each time the script runs, it:
+Each time the script runs, it does a number of things:
 
 **Tidies up** data files, by:
 1. removing the time part of any `@done(...)` mentions that NotePlan automatically adds when the 'Append Completion Date' option is on.
@@ -20,7 +20,7 @@ Moves any Daily (Calendar) note entries with a `[[Note title]]` in it to the men
 NB: This only operates from Daily (Calendar) notes; it therefore doesn't interfere with **linking and backlinking** between main notes.
 
 Changes any mentions of **date offset patterns** (e.g. `{-10d}`, `{+2w}`, `{-3m}` to being scheduled dates (e.g. `>2020-02-27`), if it can find a DD-MM-YYYY date pattern in the previous markdown heading or previous main task if it has sub-tasks. This allows for users to define simple **templates** and copy and paste them into the note, set the due date at the start, and the other dates are then worked out for you.
-- Valid intervals are specified as `[+][0-9][dwmqy]`. This allows for `d`ays, `w`eeks, `m`onths, `q`uarters or `y`ears.
+- Valid intervals are specified as `[+][0-9][bdwmqy]`. This allows for `b`usiness days,  `d`ays, `w`eeks, `m`onths, `q`uarters or `y`ears. (Business days skip weekends. If the existing date happens to be on a weekend, it's treated as being the next working day.)
 - There's also the special case `{0d}` meaning on the day itself
 - It also ignores offsets in a section with a heading that includes a #template hashtag.
 - You can configure the format of the date it's looking for with the DATE_OFFSET_FORMAT variable (see below).
@@ -47,7 +47,7 @@ You can also specify options:
 - `-a` (`--noarchive`) don't archive completed tasks into the `# Done` section
 - `-n` (`--nomove`) turn off moving mentions of [[Note]] in a daily calendar day file to the [[Note]]. You'll want to do this if you're using the [[...]] notation for backlinks (from NP v3.0.15 onwards)
 - `-s` (`--keepschedules`) keep the scheduled (>) dates of completed tasks
-- `-f` (`--skipfile=NOTETITLE`) don't process specific note
+- `-f` (`--skipfile=NOTETITLE[,NOTETITLE2,etc]`) don't process specific note(s)
 - `-i` (`--skiptoday`) don't process today's file
 - `-v` for verbose output 
 - `-w` for more verbose output
