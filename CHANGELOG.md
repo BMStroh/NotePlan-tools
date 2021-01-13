@@ -1,5 +1,31 @@
 # CHANGELOG
 
+## v1.8.6 8.1.2021
+- [Add] Works with tasks that use the `- ` and `- [ ]` markers, as well as `* ` and `* [ ]` [Issue 24]
+
+## v1.8.5 8.1.2021
+- [Add] For event creation can now also specify time patterns of form 4-6PM and just 3-4
+- [Add] Extend logging to see why some files aren't matching for a user
+
+## v1.8.4 8.1.2021
+- [Add] Add a second custom date match style for base dates to use in date offset patterns. See README for RE_DATE_OFFSET_CUSTOM.
+- [Change] The built-in date match style for base dates is now NotePlan's usual YYYY-MM-DD, not DD-MM-YYYY etc.
+
+## v1.8.3 6.1.2021
+- [Improve] Can now use simpler '3PM' type of time spec when creating events.
+
+## v1.8.2. 2.1.2021
+- [Improve] Can now customise the `#create_event` tag used to trigger creating events. Also opens the selected Calendar app if needed first, and reduces the delay if not. [Issue 36]
+
+## v1.8.1. 23.12.2020
+- [Improve] Can now add location to created events, and copies any description from following indented lines. [Issue 36]
+
+## v1.8.0. 21.12.2020
+- [New] Add ability to create events in the Calendar, based on time-blocking syntax. See README for more details. [Issue 36]
+
+## v1.7.4. 19.12.2020
+- [Improve] Clarify documentation to show all sorts of lines in daily notes are moved to the mentioned [[note title]], not just task or header lines. Also loosened unnecessarily strict regexes used here.
+
 ## v1.7.3. 10.12.2020
 - [New] Allow use of weekdays in repeats and template dates (using 'b' rather than usual 'd' for days) [Issue 32]
 

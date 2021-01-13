@@ -1,12 +1,12 @@
 #!/usr/bin/ruby
 #-------------------------------------------------------------------------------
 # NotePlan Tools script
-# by Jonathan Clark, v1.7.3, 10.12.2020
+# by Jonathan Clark, v1.8.6, 8.1.2021
 #-------------------------------------------------------------------------------
 # See README.md file for details, how to run and configure it.
 # Repository: https://github.com/jgclark/NotePlan-tools/
 #-------------------------------------------------------------------------------
-VERSION = '1.7.3'.freeze
+VERSION = "1.8.6"
 
 require 'date'
 require 'time'
@@ -21,12 +21,17 @@ HOURS_TO_PROCESS = 24 # by default will process all files changed within this nu
 NUM_HEADER_LINES = 3 # suits my use, but probably wants to be 1 for most people
 TAGS_TO_REMOVE = ['#waiting', '#high'].freeze # simple array of strings
 DATE_TIME_LOG_FORMAT = '%e %b %Y %H:%M'.freeze # only used in logging
-DATE_OFFSET_FORMAT = '%e-%b-%Y'.freeze # TODO: format used to find date to use in offsets
+RE_DATE_FORMAT_CUSTOM = '\d{1,2}[\-\.//][01]?\d[\-\.//]\d{4}'.freeze # regular expression of alternative format used to find dates in templates. This matches DD.MM.YYYY and similar.
 DATE_TODAY_FORMAT = '%Y%m%d'.freeze # using this to identify the "today" daily note
+DATE_TIME_APPLESCRIPT_FORMAT = '%e %b %Y %H:%M:%S'.freeze # only used when creating Calendar events (via AppleScript)
+CALENDAR_APP_TO_USE = 'Calendar' # Name of Calendar app to use in create_event AppleScript. Default is 'Calendar'.
+CALENDAR_NAME_TO_USE = 'Jonathan (iCloud)' # Apple (iCal) Calendar name to create new events in (if required)
+CREATE_EVENT_TAG_TO_USE = '#create_event' # customise if you want a different tag
 
 #-------------------------------------------------------------------------------
 # Other Constants & Settings
 #-------------------------------------------------------------------------------
+RE_YYYY_MM_DD = '\d{4}[\-\.//][01]?\d[\-\.//]\d{1,2}' # built-in format for finding dates of form YYYY-MM-DD and similar
 USERNAME = ENV['LOGNAME'] # pull username from environment
 USER_DIR = ENV['HOME'] # pull home directory from environment
 DROPBOX_DIR = "#{USER_DIR}/Dropbox/Apps/NotePlan/Documents".freeze
@@ -55,7 +60,7 @@ $archive = 0
 $remove_scheduled = 1
 $allNotes = []  # to hold all note objects
 $notes    = []  # to hold all relevant note objects
-$time_today = time_now.strftime(DATE_TODAY_FORMAT)
+$date_today = time_now.strftime(DATE_TODAY_FORMAT)
 $npfile_count = -1 # number of NPFile objects created so far (incremented before first use)
 
 #-------------------------------------------------------------------------
@@ -76,10 +81,10 @@ def calc_offset_date(old_date, interval)
     # Method from Arjen at https://stackoverflow.com/questions/279296/adding-days-to-a-date-but-excluding-weekends
     # Avoids looping, and copes with negative intervals too
     current_day_of_week = old_date.strftime("%u").to_i  # = day of week with Monday = 0, .. Sunday = 6
-    dayOfWeek = num < 0 ? (current_day_of_week - 12).modulo(7) : (current_day_of_week + 6).modulo(7) 
+    dayOfWeek = num.negative? ? (current_day_of_week - 12).modulo(7) : (current_day_of_week + 6).modulo(7)
     num -= 1 if dayOfWeek == 6
     num += 1 if dayOfWeek == -6
-    days_to_add = num + ((num + dayOfWeek).div(5)) * 2
+    days_to_add = num + (num + dayOfWeek).div(5) * 2
   when 'd'
     days_to_add = num
   when 'w'
@@ -95,7 +100,7 @@ def calc_offset_date(old_date, interval)
   end
   puts "    c_o_d: with #{old_date} interval #{interval} found #{days_to_add} days_to_add" if $verbose > 1
   newDate = old_date + days_to_add
-  # implied return newDate
+  return newDate
 end
 
 def create_new_empty_file(title, ext)
@@ -122,12 +127,19 @@ def create_new_empty_file(title, ext)
 
   # Now read this new file into the $allNotes array
   Dir.chdir(NP_NOTES_DIR)
-  # sleep(3)
+  sleep(3) # wait for the file to become available. TODO: probably a smarter way to do this
   filename = "#{title}.#{ext}"
   new_note = NPFile.new(filename)
   new_note_id = new_note.id
   $allNotes[new_note_id] = new_note
-  # puts "New note id #{new_note_id}. New $allNotes count = #{$allNotes.count}"
+  puts "Added new note id #{new_note_id} with title '#{title}' and filename '#{filename}'. New $allNotes count = #{$allNotes.count}" if $verbose > 1
+end
+
+def osascript(script)
+  # Run applescript
+  # from gist https://gist.github.com/dinge/6983008
+  puts "About to execute this AppleScript:\n#{script}\n" if $verbose > 1
+  system 'osascript', *script.split(/\n/).map { |line| ['-e', line] }.flatten
 end
 
 #-------------------------------------------------------------------------
@@ -153,9 +165,8 @@ class NPFile
     $npfile_count += 1
     @id = $npfile_count
     @filename = this_file
-    puts "initialising NPFile id #{@id} from #{this_file}" if $verbose > 1
     @modified_time = File.exist?(filename) ? File.mtime(this_file) : 0
-    @title = nil
+    @title = ''
     @lines = []
     @line_count = 0
     @cancelled_header = 0
@@ -163,6 +174,8 @@ class NPFile
     @is_today = false
     @is_calendar = false
     @is_updated = false
+
+    puts "Init NPFile #{@id} from #{this_file}, updated #{File.mtime(this_file)}" if $verbose > 1
 
     # initialise other variables (that don't need to persist with the class)
     n = 0
@@ -174,35 +187,185 @@ class NPFile
       @lines[n] = line
       @done_header = n  if line =~ /^## Done$/
       @cancelled_header = n if line =~ /^## Cancelled$/
-      # n -= 1 if line =~ /^\s*[\*\-]\s*$/ # i.e. remove lines with just a * or -
       n += 1
     end
     f.close
     @line_count = @lines.size
-
     # Now make a title for this file:
     if @filename =~ /\d{8}\.(txt|md)/
       # for Calendar file, use the date from filename
       @title = @filename[0..7]
       @is_calendar = true
-      @is_today = @title == $time_today
+      @is_today = @title == $date_today
     else
       # otherwise use first line (but take off heading characters at the start and starting and ending whitespace)
-      tempTitle = @lines[0].gsub(/^#+\s*/, '')
-      @title = tempTitle.gsub(/\s+$/, '')
+      tempTitle = @lines[0].gsub(/^#+\s*/, '').gsub(/\s+$/, '')
+      @title = !tempTitle.empty? ? tempTitle : 'temp_header' # but check it doesn't get to be blank
       @is_calendar = false
       @is_today = false
     end
   end
 
   # def self.new2(*args)
-  #   # FIXME: Use API instead?
+  #   # TODO: Use API instead?
   #   # This is a second initializer, to create a new empty file, so have to use a different syntax.
   #   # Create empty NPFile object, and then pass to detailed initializer
   #   object = allocate
   #   object.create_new_empty_file(*args)
   #   object # implicit return
   # end
+
+  def create_events_from_timeblocks
+    # Create calendar event in default calendar from an NP timeblock given in
+    # a daily note, where #create_event is specified.
+    # (As of NP 3.0 time blocking only works in headers and tasks, but Eduard has
+    # said he will add to bullets as well, so I'm doing that already.)
+    # Examples:
+    #   '* Write proposal at 12-14 #create_event' --> caledar event 12-2pm
+    #   '### Write proposal >2020-12-20 at 2pm #create_event' --> caledar event 2pm for 1 hour on that date
+    #   '- clear before meeting 2:00-2:30pm #create_event' --> caledar event 2-2:30pm
+    puts '  create_events_from_timeblocks ...' if $verbose > 1
+    n = 0
+    while n < @line_count
+      this_line = @lines[n]
+      unless this_line =~ /#{CREATE_EVENT_TAG_TO_USE}/
+        n += 1
+        next
+      end
+      # we have a line with one or more events to create
+      # get date: if there's a >YYYY-MM-DD mentioned in the line, use that,
+      # otherwise use date of calendar note. Format: YYYYMMDD
+      event_date_s = ''
+      if this_line =~ />\d{4}-\d{2}-\d{2}/
+        this_line.scan(/>(\d{4}-\d{2}-\d{2})/) { |m| event_date_s = m.join.tr('-', '') }
+        puts "    - found event creation date spec: #{event_date_s}" if $verbose > 1
+      elsif @is_calendar
+        event_date_s = @filename[0..7]
+        puts "    - defaulting to create event on day: #{event_date_s}" if $verbose > 1
+      else
+        event_date_s = $date_today
+        puts "    - defaulting to create event today: #{event_date_s}" if $verbose > 1
+      end
+      # make title: strip off #create_event, time strings, header/task/bullet punctuation, and any location info
+      event_title = this_line.chomp
+      event_title.gsub!(/ #{CREATE_EVENT_TAG_TO_USE}/, '')
+      event_title.gsub!(/^\s*[\*->](\s\[.\])?\s*/, '')
+      event_title.gsub!(/^#+\s*/, '')
+      event_title.gsub!(/ at \d\d?(-\d\d?)?(am|pm|AM|PM)?/, '')
+      event_title.gsub!(/ \d\d?:\d\d(-\d\d?:\d\d)?(am|pm|AM|PM)?/, '')
+      event_title.gsub!(/>\d{4}\-\d{2}\-\d{2}/, '')
+      event_title.gsub!(/\sat\s.*$/, '')
+
+      # get times for event.
+      # if no end time given, default to a 1-hour duration event
+      start_mins = end_mins = start_hour = end_hour = 0
+      time_parts = []
+      if this_line =~ /[^\d-]\d\d?:\d\d(am|pm|AM|PM)?[\s$]/i
+        # times of form '3:00[am|pm]'
+        time_parts_da = this_line.scan(/[^\d-](\d\d?):(\d\d)(am|pm)?[\s$]/i)
+        time_parts = time_parts_da[0]
+        start_hour = time_parts[2] =~ /pm/i ? time_parts[0].to_i + 12 : time_parts[0].to_i
+        start_mins = time_parts[1].to_i
+        end_hour = start_hour + 1 # if no end part given, default to a 1-hour duration event
+        end_mins = start_mins
+      elsif this_line =~ /[^\d-]\d\d?(am|pm)[\s$]/i
+        # times of form '3am|pm'
+        time_parts_da = this_line.scan(/[^\d-](\d\d?)(am|pm)[\s$]/i)
+        time_parts = time_parts_da[0]
+        start_hour = time_parts[1] =~ /pm/i ? time_parts[0].to_i + 12 : time_parts[0].to_i
+        start_mins = 0
+        end_hour = start_hour + 1 # if no end part given, default to a 1-hour duration event
+        end_mins = 0
+      elsif this_line =~ /[^\d-]\d\d?-\d\d?[\s$]/i
+        # times of form '3-5', implied 24-hour clock
+        time_parts_da = this_line.scan(/[^\d-](\d\d?)-(\d\d?)[\s$]/i)
+        time_parts = time_parts_da[0]
+        start_hour = time_parts[0].to_i
+        start_mins = 0
+        end_hour = time_parts[1].to_i
+        end_mins = 0
+      elsif this_line =~ /[^\d-]\d\d?-\d\d?(am|pm)[\s$]/i
+        # times of form '3-5am|pm'
+        time_parts_da = this_line.scan(/[^\d-](\d\d?)-(\d\d?)(am|pm)[\s$]/i)
+        time_parts = time_parts_da[0]
+        start_hour = time_parts[2] =~ /pm/i ? time_parts[0].to_i + 12 : time_parts[0].to_i
+        start_mins = 0
+        end_hour = time_parts[2] =~ /pm/i ? time_parts[1].to_i + 12 : time_parts[1].to_i
+        end_mins = 0
+      elsif this_line =~ /[^\d-]\d\d?:\d\d-\d\d?:\d\d(am|pm)?[\s$]/i
+        # times of form '3:00-4:00[am|pm]'
+        time_parts_da = this_line.scan(/[^\d-](\d\d?):(\d\d)-(\d\d?):(\d\d)(am|pm)?[\s$]/i)
+        time_parts = time_parts_da[0]
+        start_hour = time_parts[4] =~ /pm/i ? time_parts[0].to_i + 12 : time_parts[0].to_i
+        start_mins = time_parts[1].to_i
+        end_hour = time_parts[4] =~ /pm/i ? time_parts[2].to_i + 12 : time_parts[2].to_i
+        end_mins = time_parts[3].to_i
+      else
+        # warn as can't find suitable time String
+        puts "  - want to create '#{event_title}' event through #create_event, but cannot find suitable time spec".colorize(WarningColour)
+        n += 1
+        next
+      end
+      # create start and end datetime formats to use in applescript
+      start_dt = DateTime.new(event_date_s[0..3].to_i, event_date_s[4..5].to_i, event_date_s[6..7].to_i, start_hour, start_mins, 0)
+      end_dt   = DateTime.new(event_date_s[0..3].to_i, event_date_s[4..5].to_i, event_date_s[6..7].to_i, end_hour, end_mins, 0)
+      start_dt_s = start_dt.strftime(DATE_TIME_APPLESCRIPT_FORMAT)
+      end_dt_s   = end_dt.strftime(DATE_TIME_APPLESCRIPT_FORMAT)
+      puts "  - will create event '#{event_title}' from #{start_dt_s} to #{end_dt_s}"
+      puts "    (time_parts:#{time_parts})" if $verbose > 1
+
+      # use ' at X...' to set the_location (rather than that type of timeblocking)
+      the_location = this_line =~ /\sat\s.*/ ? this_line.scan(/\sat\s(.*)/).join : ''
+
+      # Copy any indented comments/notes into the_description field
+      the_description = ''
+      # Incrementally add lines until we find ones at the same or lower level of indent.
+      # (similar to code from move_daily_ref_to_notes)
+      line_indent = ''
+      this_line.scan(/^(\s*)\*/) { |m| line_indent = m.join }
+      puts "    - building event description with starting indent of #{line_indent.length}" if $verbose > 1
+      nn = n + 1
+      while nn < @line_count
+        line_to_check = @lines[nn]
+        # What's the indent of this line?
+        line_to_check_indent = ''
+        line_to_check.scan(/^(\s*)\S/) { |m| line_to_check_indent = m.join }
+        break if line_indent.length >= line_to_check_indent.length
+
+        the_description += line_to_check.lstrip # add this line to the description, with leading whitespace removed
+        nn += 1
+      end
+
+      # Now write the AppleScript and run it
+      begin
+        osascript <<-APPLESCRIPT
+          set calendarName to "#{CALENDAR_NAME_TO_USE}"
+          set theSummary to "#{event_title}"
+          set theDescrption to "#{the_description}"
+          set theLocation to "#{the_location}"
+          set startDate to "#{start_dt_s}"
+          set endDate to "#{end_dt_s}"
+          set startDate to date startDate
+          set endDate to date endDate
+          if application "#{CALENDAR_APP_TO_USE}" is not running then
+            launch application "#{CALENDAR_APP_TO_USE}" # hoped this would start it without a window, but not so
+            delay 3 # pause for 3 seconds while app launches
+          end if
+          tell application "Calendar"
+            tell (first calendar whose name is calendarName)
+              make new event at end of events with properties {summary:theSummary, start date:startDate, end date:endDate, description:theDescrption, location:theLocation}
+            end tell
+          end tell
+        APPLESCRIPT
+        # Now update the line to show #event_created not #create_event
+        @lines[n].gsub!(CREATE_EVENT_TAG_TO_USE, '#event_created')
+        @is_updated = true
+        n += 1
+      rescue StandardError => e
+        puts "ERROR: #{e.exception.message} when calling AppleScript to create an event".colorize(WarningColour)
+      end
+    end
+  end
 
   def clear_empty_tasks_or_headers
     # Clean up lines with just * or - or #s in them
@@ -304,28 +467,27 @@ class NPFile
     while n < @line_count
       line = @lines[n]
       is_header = false
-      # find todo or header lines with [[note title]] mentions
-      if line !~ /^#+\s+.*\[\[.*\]\]|^\s*.*\[\[.*\]\]/
-        n += 1 # get ready to look at next line
+      # find lines with [[note title]] mentions
+      if line !~ /\[\[.+\]\]/ # used to be /\[\[.+\]\]|^\s*.*\[\[.*\]\]/ # used to be /^#+\s+.*\[\[.*\]\]|^\s*.*\[\[.*\]\]/
+        # this line doesn't match, so break out of loop and go to look at next line
+        n += 1
         next
       end
-      is_header = true if line =~ /^#+\s+.*\[\[.*\]\]/
+      is_header = true if line =~ /^#+\s+.*/
 
       # the following regex matches returns an array with one item, so make a string (by join)
       # NB the '+?' gets minimum number of chars, to avoid grabbing contents of several [[notes]] in the same line
       line.scan(/\[\[(.+?)\]\]/) { |m| noteName = m.join }
       puts "  - found note link [[#{noteName}]] in header on line #{n + 1} of #{@line_count}" if is_header && ($verbose > 0)
-      puts "  - found note link [[#{noteName}]] in task on line #{n + 1} of #{@line_count}" if !is_header && ($verbose > 0)
+      puts "  - found note link [[#{noteName}]] in notes on line #{n + 1} of #{@line_count}" if !is_header && ($verbose > 0)
 
       # find the note file to add to
-      # expect there to be several with same title: if so then use the one with
-      # the most recent modified_time
+      # expect there to be several with same title: if so then use the one with the most recent modified_time
       # mtime = Time.new(1970, 1, 1) # i.e. the earlist possible time
       $allNotes.each do |nn|
         next if nn.title != noteName
 
-        noteToAddTo = nn.id # if nn.modified_time > mtime # TODO: is this needed?
-        # mtime = nn.modified_time
+        noteToAddTo = nn.id # if nn.modified_time > mtime # TODO: bring this back in
         puts "  - found matching title (id #{noteToAddTo}) " if $verbose > 1
       end
 
@@ -333,7 +495,7 @@ class NPFile
         # no existing note was found with this title, so create it and add this text to it
         puts "  - warning: can't find matching note for [[#{noteName}]] -- so will create it".colorize(InfoColour)
         ext = @filename.scan(/\.(.+?)$/).join('')
-        create_new_empty_file(noteName, ext) # #FIXME: how to have multiple initializers?
+        create_new_empty_file(noteName, ext) # TODO: ideally find a way to have multiple initialisers
         # now find the id of this newly-created NPFile
         noteToAddTo = $npfile_count
         # f = $allNotes[noteToAddTo].filename # found that f wasn't being used, so commented out
@@ -345,11 +507,11 @@ class NPFile
       # Remove the [[name]] text by finding string points
       label_start = line.index('[[') - 2 # remove space before it as well
       label_end = line.index(']]') + 2
-      line = "#{line[0..label_start]}#{line[label_end..-2]}" # also chomp off last character (newline)
+      # also chomp off last character (newline)
+      line = "#{line[0..label_start]}#{line[label_end..-2]}"
 
       if !is_header
-        # This is a todo line ...
-        # If no due date is specified in rest of the todo, add date from the title of the calendar file it came from
+        # If no due date is specified in rest of the line, add date from the title of the calendar file it came from
         if line !~ />\d{4}\-\d{2}\-\d{2}/
           cal_date = "#{@title[0..3]}-#{@title[4..5]}-#{@title[6..7]}"
           puts "    - '#{cal_date}' to add from #{@title}" if $verbose > 1
@@ -357,11 +519,10 @@ class NPFile
         else
           lines_to_output = line
         end
-        # puts "    - '#{lines_to_output}' and now n=#{n + 1}" if $verbose > 1
         # Work out indent level of current line
         line_indent = ''
         line.scan(/^(\s*)\*/) { |m| line_indent = m.join }
-        puts "  - starting task analysis at line #{n + 1} of #{@line_count} with indent '#{line_indent}' (#{line_indent.length})" if $verbose > 1
+        puts "  - starting line analysis at line #{n + 1} of #{@line_count} with indent '#{line_indent}' (#{line_indent.length})" if $verbose > 1
         # Remove this line from the calendar note
         @lines.delete_at(n)
         @line_count -= 1
@@ -394,7 +555,7 @@ class NPFile
         @line_count -= 1
         moved += 1
         puts "  - starting header analysis at line #{n + 1}" if $verbose > 1
-        # n += 1
+
         while n < @line_count
           line_to_check = @lines[n]
           puts "    - l_t_o checking '#{line_to_check}'" if $verbose > 1
@@ -438,14 +599,14 @@ class NPFile
     while n < searchLineLimit
       n += 1
       line = @lines[n]
-      next unless line =~ /\*\s+\[x\]/
+      next unless line =~ /\*\s+\[x\]/ # TODO change for different task markers
 
       # save this line number
       doneToMove.push(n)
       # and look ahead to see how many lines to move -- all until blank or starting # or *
       linesToMove = 0
       while n < @line_count
-        break if (@lines[n + 1] =~ /^(#+\s+|\*\s+)/) || (@lines[n + 1] =~ /^\s*$/)
+        break if (@lines[n + 1] =~ /^(#+\s+|\*\s+)/) || (@lines[n + 1] =~ /^\s*$/) # TODO change for different task markers
 
         linesToMove += 1
         n += 1
@@ -501,7 +662,7 @@ class NPFile
     while n < searchLineLimit
       n += 1
       line = @lines[n]
-      next unless line =~ /\*\s*\[\-\]/
+      next unless line =~ /\*\s*\[\-\]/ # TODO change for different task markers
 
       # save this line number
       cancToMove.push(n)
@@ -509,7 +670,7 @@ class NPFile
       linesToMove = 0
       while n < @line_count
         linesToMove += 1
-        break if (@lines[n + 1] =~ /^(#+\s+|\*\s+)/) || (@lines[n + 1] =~ /^\s*$/)
+        break if (@lines[n + 1] =~ /^(#+\s+|\*\s+)/) || (@lines[n + 1] =~ /^\s*$/) # TODO change for different task markers
 
         n += 1
       end
@@ -590,54 +751,70 @@ class NPFile
   def use_template_dates
     # Take template dates and turn into real dates
     puts '  use_template_dates ...' if $verbose > 1
-    dateString = ''
-    currentTargetDate = ''
-    calcDate = ''
-    lastWasTemplate = false
+    date_string = ''
+    current_target_date = ''
+    calc_date = ''
+    last_was_template = false
     n = 0
     # Go through each line in the file
     @lines.each do |line|
-      dateString = ''
-      # find date in markdown header lines (of form d.m.yyyy and variations of that form)
+      date_string = ''
+      # look for base date, of form YYYY-MM-DD and variations and whatever RE_DATE_FORMAT_CUSTOM gives
       if line =~ /^#+\s/
         # clear previous settings when we get to a new heading
-        currentTargetDate = ''
-        lastWasTemplate = false
-        # TODO: Allow configuration of the format of the date it's looking for with the DATE_OFFSET_FORMAT variable
-        line.scan(%r{(\d{1,2}[\-\./]\d{1,2}[\-\./]\d{4})}) { |m| dateString = m.join }
-        if dateString != ''
-          # We have a date string to use for any offsets in the following section
-          currentTargetDate = dateString
-          puts "    UTD: Found CTD #{currentTargetDate} in '#{line.chomp}'" if $verbose > 1
-        end
-        if line =~ /#template/
-          # We have a #template tag so ignore any offsets in the following section
-          lastWasTemplate = true
-          puts "    UTD: Found #template in '#{line.chomp}'" if $verbose > 1
-        end
+        current_target_date = ''
+        last_was_template = false
       end
 
-      # find todo lines with {+3d} or {-4w} etc. plus {0d} special case
-      dateOffsetString = ''
-      if (line =~ /\*\s+(\[ \])?/) && (line =~ /\{[\+\-]?\d+[bdwm]\}/)
-        puts "    UTD: Found line '#{line.chomp}'" if $verbose > 1
-        line.scan(/\{([\+\-]?\d+[bdwm])\}/) { |m| dateOffsetString = m.join }
-        if dateOffsetString != '' && !lastWasTemplate
-          puts "    UTD: Found DOS #{dateOffsetString} in '#{line.chomp}' and lastWasTemplate=#{lastWasTemplate}" if $verbose > 1
-          if currentTargetDate != ''
-            calcDate = calc_offset_date(Date.parse(currentTargetDate), dateOffsetString)
+      # Try matching for the standard YYYY-MM-DD date pattern
+      line.scan(/[^\d\(<>](#{RE_YYYY_MM_DD})/) { |m| date_string = m.join }
+      if date_string != ''
+        # We have a date string to use for any offsets in the following section
+        current_target_date = date_string
+        puts "    - Found CTD #{current_target_date} in '#{line.chomp}'" if $verbose > 1
+      else
+        # Try matching for the custom date pattern, configured at the top
+        line.scan(/[^\d\(<>](#{RE_DATE_FORMAT_CUSTOM})/) { |m| date_string = m.join }
+        if date_string != ''
+          # We have a date string to use for any offsets in the following section
+          current_target_date = date_string
+          puts "    - Found CTD #{current_target_date} in '#{line.chomp}'" if $verbose > 1
+        end
+      end
+      if line =~ /#template/
+        # We have a #template tag so ignore any offsets in the following section
+        last_was_template = true
+        puts "    . Found #template in '#{line.chomp}'" if $verbose > 1
+      end
+
+      # ignore line if last_was_template
+      break if last_was_template
+
+      # find lines with {+3d} or {-4w} etc. plus {0d} special case
+      date_offset_string = ''
+      if line =~ /\{[\+\-]?\d+[bdwm]\}/
+        puts "    - Found line '#{line.chomp}'" if $verbose > 1
+        line.scan(/\{([\+\-]?\d+[bdwm])\}/) { |m| date_offset_string = m.join }
+        if date_offset_string != ''
+          puts "    - Found DOS #{date_offset_string} in '#{line.chomp}' and last_was_template=#{last_was_template}" if $verbose > 1
+          if current_target_date != ''
+            begin
+              calc_date = calc_offset_date(Date.parse(current_target_date), date_offset_string)
+            rescue
+              puts "    Error while parsing date '#{current_target_date}' for #{date_offset_string}".colorize(WarningColour)
+            end
             # Remove the offset text (e.g. {-3d}) by finding string points
             label_start = line.index('{') - 1
             label_end = line.index('}') + 2
             line = "#{line[0..label_start]}#{line[label_end..-2]}" # also chomp off last character (newline)
             # then add the new date
-            line += " >#{calcDate}"
+            line += ">#{calc_date}"
             @lines[n] = line
-            puts "    Used #{dateOffsetString} line to make '#{line.chomp}'" if $verbose > 1
+            puts "      -> Used #{date_offset_string} line to make '#{line.chomp}'" if $verbose > 1
             @is_updated = true
             @line_count += 1
           elsif $verbose > 0
-            puts "    Warning: have a template, but no currentTargetDate before line '#{line.chomp}'".colorize(WarningColour)
+            puts "    Warning: have an offset date, but no current_target_date before line '#{line.chomp}'".colorize(WarningColour)
           end
         end
       end
@@ -667,7 +844,7 @@ class NPFile
       updated_line = ''
       completed_date = ''
       # find lines with date-time to shorten, and capture date part of it
-      # i.e. @done(YYYY-MM-DD HH:MM)
+      # i.e. @done(YYYY-MM-DD HH:MM[AM|PM])
       if line =~ /@done\(\d{4}\-\d{2}\-\d{2} \d{2}:\d{2}(?:.(?:AM|PM))?\)/
         # get completed date
         line.scan(/\((\d{4}\-\d{2}\-\d{2}) \d{2}:\d{2}(?:.(?:AM|PM))?\)/) { |m| completed_date = m.join }
@@ -725,7 +902,7 @@ class NPFile
     # Go through each line in the file
     later_header_level = this_header_level = 0
     at_eof = 1
-    while n.positive? || n.zero?
+    while n.positive? || n.zero? # FIXME: this BMStroh addition killing some note titles?
       line = @lines[n]
       # find header lines
       # puts "  - #{n}: '#{line.chomp}'"
@@ -788,11 +965,14 @@ class NPFile
                else
                  "#{NP_NOTES_DIR}/#{@filename}"
                end
-    # TODO: needs error handling
-    File.open(filepath, 'w') do |f|
-      @lines.each do |line|
-        f.puts line
+    begin
+      File.open(filepath, 'w') do |f|
+        @lines.each do |line|
+          f.puts line
+        end
       end
+    rescue StandardError => e
+      puts "ERROR: #{e.exception.message} when re-writing note file #{filpath}".colorize(WarningColour)
     end
   end
 end
@@ -848,8 +1028,6 @@ $verbose = $quiet ? 0 : options[:verbose] # if quiet, then verbose has to  be 0
 $archive = options[:archive]
 $remove_scheduled = options[:remove_scheduled]
 
-# n = 0 # number of notes and daily entries to work on
-
 #--------------------------------------------------------------------------------------
 # Start by reading all Notes files in
 # (This is needed to have a list of all note titles that we might be moving tasks to.)
@@ -863,7 +1041,7 @@ begin
 rescue StandardError => e
   puts "ERROR: #{e.exception.message} when reading in all notes files".colorize(WarningColour)
 end
-puts "Read in all #{$npfile_count} Note files" if $verbose > 0
+puts "Read in all Note files: #{$npfile_count} found\n" if $verbose > 0
 
 if ARGV.count.positive?
   # We have a file pattern given, so find that (starting in the notes directory), and use it
@@ -871,21 +1049,15 @@ if ARGV.count.positive?
   begin
     ARGV.each do |pattern|
       # if pattern has a '.' in it assume it is a full filename ...
-      if pattern =~ /\./
-        glob_pattern = pattern
-      else
-        # ... otherwise treat as close to a regex term as possible with Dir.glob
-        glob_pattern = '[!@]**/*' + pattern + '*.{md,txt}'
-      end
-      puts " For glob_pattern #{glob_pattern} found note filenames:" if $verbose > 1
+      # ... otherwise treat as close to a regex term as possible with Dir.glob
+      glob_pattern = pattern =~ /\./ ? pattern : '[!@]**/*' + pattern + '*.{md,txt}'
+      puts "  For glob_pattern #{glob_pattern} found note filenames:" if $verbose > 0
       Dir.glob(glob_pattern).each do |this_file|
-        puts "  #{this_file}" if $verbose
+        puts "  - #{this_file}" if $verbose > 0
         # Note has already been read in; so now just find which one to point to, by matching filename
         $allNotes.each do |this_note|
-          if this_note.filename == this_file
-            $notes << this_note # copy the $allNotes item into $notes array
-            # n += 1
-          end
+          # copy the $allNotes item into $notes array
+          $notes << this_note if this_note.filename == this_file
         end
       end
 
@@ -893,11 +1065,10 @@ if ARGV.count.positive?
       Dir.chdir(NP_CALENDAR_DIR)
       glob_pattern = '*' + pattern + '*.{md,txt}'
       Dir.glob(glob_pattern).each do |this_file|
-        puts "  #{this_file}" if $verbose
+        puts "  - #{this_file}" if $verbose > 0
         next if File.zero?(this_file) # ignore if this file is empty
 
         $notes << NPFile.new(this_file)
-        # n += 1
       end
     end
   rescue StandardError => e
@@ -906,7 +1077,6 @@ if ARGV.count.positive?
 
 else
   # Read metadata for all Note files, and find those altered in the last 24 hours
-  mtime = 0
   puts "Starting npTools at #{time_now_fmttd} for all NP files altered in last #{HOURS_TO_PROCESS} hours." unless $quiet
   begin
     $allNotes.each do |this_note|
@@ -914,7 +1084,6 @@ else
 
       # Note has already been read in; so now just find which one to point to
       $notes << this_note
-      # n += 1
     end
   rescue StandardError => e
     puts "ERROR: #{e.exception.message} when finding recently changed files".colorize(WarningColour)
@@ -924,14 +1093,13 @@ else
   begin
     Dir.chdir(NP_CALENDAR_DIR)
     Dir.glob(['{[!@]**/*,*}.{txt,md}']).each do |this_file|
-      # if modified time (mtime) in the last 24 hours
-      mtime = File.mtime(this_file)
+      puts "    Checking daily file #{this_file}, updated #{File.mtime(this_file)}, size #{File.size(this_file)}" if $verbose > 1
       next if File.zero?(this_file) # ignore if this file is empty
-      next unless mtime > (time_now - HOURS_TO_PROCESS * 60 * 60)
+      # if modified time (mtime) in the last 24 hours
+      next unless File.mtime(this_file) > (time_now - HOURS_TO_PROCESS * 60 * 60)
 
       # read the calendar file in
       $notes << NPFile.new(this_file)
-      # n += 1
     end
   rescue StandardError => e
     puts "ERROR: #{e.exception.message} when finding recently changed files".colorize(WarningColour)
@@ -939,21 +1107,20 @@ else
 end
 
 #--------------------------------------------------------------------------------------
-
 if $notes.count.positive? # if we have some files to work on ...
-  puts "Found #{$notes.count} files to process:" if $verbose > 0
+  puts "\nFound #{$notes.count} files to process:" if $verbose > 0
   # For each NP file to process, do the following:
   $notes.sort! { |a, b| a.title <=> b.title }
   $notes.each do |note|
     if note.is_today && options[:skiptoday]
-      puts 'Skipping ' + note.title.to_s.bold + ' due to --skiptoday option'
+      puts '(Skipping ' + note.title.to_s.bold + ' due to --skiptoday option)' if $verbose > 0
       next
     end
     if options[:skipfile].include? note.title
-      puts 'Skipping ' + note.title.to_s.bold + ' due to --skipfile option'
+      puts '(Skipping ' + note.title.to_s.bold + ' due to --skipfile option)' if $verbose > 0
       next
     end
-    puts "Cleaning file id #{note.id} " + note.title.to_s.bold if $verbose > 0
+    puts " Processing file id #{note.id}: " + note.title.to_s.bold if $verbose > 0
     note.clear_empty_tasks_or_headers
     note.remove_empty_header_sections
     note.remove_unwanted_tags_dates
@@ -962,7 +1129,8 @@ if $notes.count.positive? # if we have some files to work on ...
     note.remove_multiple_empty_lines
     note.move_daily_ref_to_notes if note.is_calendar && options[:move] == 1
     note.use_template_dates unless note.is_calendar
-    note.archive_lines if $archive == 1
+    note.create_events_from_timeblocks
+    note.archive_lines if $archive == 1 # not ready yet
     # If there have been changes, write out the file
     note.rewrite_file if note.is_updated
   end
